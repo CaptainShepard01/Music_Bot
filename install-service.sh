@@ -10,7 +10,7 @@ export BOT_PYTHON="$BOT_DIR/.venv/bin/python"
 
 if [ ! -f "$BOT_PYTHON" ]; then
     echo "Error: virtual environment not found at $BOT_PYTHON"
-    echo "Run: python -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    echo "Run: uv venv && uv pip install -r requirements.txt"
     exit 1
 fi
 

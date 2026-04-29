@@ -7,12 +7,14 @@ A Discord slash-command music bot that streams audio from YouTube via yt-dlp and
 | Dependency | Notes |
 |------------|-------|
 | Python 3.10+ | Uses `asyncio.get_running_loop()` and modern type hints |
+| [uv](https://docs.astral.sh/uv/) | Package and venv manager |
 | FFmpeg | Must be on `PATH` (`ffmpeg`, `ffprobe`) |
 | A Discord bot token | [discord.com/developers](https://discord.com/developers/applications) |
 
 On Manjaro / Arch Linux:
 ```bash
 sudo pacman -S python ffmpeg
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 ## Installation
@@ -22,15 +24,11 @@ sudo pacman -S python ffmpeg
 git clone https://github.com/YOUR_USERNAME/Music_Bot.git
 cd Music_Bot
 
-# 2. Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate        # Linux/macOS
-# .venv\Scripts\activate         # Windows
+# 2. Create venv and install dependencies
+uv venv
+uv pip install -r requirements.txt
 
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Create your .env file
+# 3. Create your .env file
 cp .env.example .env
 # Then edit .env and paste your Discord bot token
 ```
@@ -51,8 +49,7 @@ DISCORD_TOKEN=your_discord_bot_token_here
 ## Running locally
 
 ```bash
-source .venv/bin/activate
-python bot.py
+uv run python bot.py
 ```
 
 ## Running as a systemd service on Manjaro Linux

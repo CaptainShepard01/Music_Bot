@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 import discord
@@ -8,6 +9,8 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -25,15 +28,19 @@ YDL_OPTIONS = {
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
-ydl = yt_dlp.YoutubeDL(YDL_OPTIONS)
 
-# Per-guild state: {guild_id: {"queue": asyncio.Queue, "task": asyncio.Task}}
+# Per-guild state
 guild_state: dict[int, dict] = {}
 
 
 def get_state(guild_id: int) -> dict:
     if guild_id not in guild_state:
-        guild_state[guild_id] = {"queue": asyncio.Queue(), "task": None}
+        guild_state[guild_id] = {
+            "queue": asyncio.Queue(),
+            "task": None,
+            "voice_channel": None,  # last known VoiceChannel; used to rejoin after drop
+            "current": None,        # info dict of the track currently playing
+        }
     return guild_state[guild_id]
 
 
@@ -45,8 +52,13 @@ def clear_queue(state: dict) -> None:
 
 async def fetch_info(query: str) -> dict | None:
     loop = asyncio.get_running_loop()
+
+    def _extract() -> dict:
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as y:
+            return y.extract_info(query, download=False)
+
     try:
-        info = await loop.run_in_executor(None, lambda: ydl.extract_info(query, download=False))
+        info = await loop.run_in_executor(None, _extract)
     except yt_dlp.utils.DownloadError:
         return None
     if "entries" in info:
@@ -54,40 +66,116 @@ async def fetch_info(query: str) -> dict | None:
     return info
 
 
-async def player_loop(guild: discord.Guild, channel: discord.TextChannel):
+async def ensure_voice(guild: discord.Guild, state: dict) -> discord.VoiceClient | None:
+    """Return a live VoiceClient, reconnecting with backoff if the connection dropped."""
+    vc = guild.voice_client
+    if vc and vc.is_connected():
+        return vc
+
+    voice_channel = state.get("voice_channel")
+    if voice_channel is None:
+        return None
+
+    # Exponential backoff: try immediately, then after 5 s, 15 s, 30 s
+    for delay in (0, 5, 15, 30):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            if guild.voice_client:
+                await guild.voice_client.disconnect(force=True)
+            return await voice_channel.connect()
+        except Exception as exc:
+            log.warning("Voice reconnect attempt failed: %s", exc)
+
+    return None
+
+
+async def play_track(vc: discord.VoiceClient, info: dict) -> Exception | None:
+    """Stream one track. Returns None on clean finish, the Exception on error."""
+    loop = asyncio.get_running_loop()
+    done = asyncio.Event()
+    result: list[Exception | None] = [None]
+
+    def after(exc: Exception | None) -> None:
+        result[0] = exc
+        # after() runs in the audio thread; schedule set() onto the event loop
+        loop.call_soon_threadsafe(done.set)
+
+    source = discord.PCMVolumeTransformer(
+        discord.FFmpegPCMAudio(info["url"], **FFMPEG_OPTIONS)
+    )
+    vc.play(source, after=after)
+
+    try:
+        await done.wait()
+    except asyncio.CancelledError:
+        if vc.is_connected():
+            vc.stop()
+        raise
+
+    return result[0]
+
+
+async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> None:
     state = get_state(guild.id)
     try:
         while True:
             try:
                 info = await asyncio.wait_for(state["queue"].get(), timeout=300)
             except asyncio.TimeoutError:
-                if guild.voice_client:
-                    await guild.voice_client.disconnect()
+                vc = guild.voice_client
+                if vc:
+                    await vc.disconnect()
                 await channel.send("Left voice channel due to inactivity.")
                 break
 
-            vc = guild.voice_client
-            if vc is None or not vc.is_connected():
-                break
+            state["current"] = info
+            title = info.get("title", "Unknown")
+            announced = False
 
-            source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(info["url"], **FFMPEG_OPTIONS)
-            )
+            for attempt in range(4):  # first try + up to 3 retries
+                if attempt > 0:
+                    await asyncio.sleep(5 * attempt)  # 5 s, 10 s, 15 s back-off
 
-            done = asyncio.Event()
-            vc.play(source, after=lambda _: done.set())
-            await channel.send(f"Now playing: **{info.get('title', 'Unknown')}**")
-            try:
-                await done.wait()
-            except asyncio.CancelledError:
-                vc.stop()
-                raise
+                    # Re-fetch a fresh stream URL — the previous one may have expired
+                    ref = info.get("webpage_url") or info.get("original_url") or title
+                    fresh = await fetch_info(ref)
+                    if fresh is None:
+                        await channel.send(f"Could not recover stream for **{title}**, skipping.")
+                        break
+                    info = fresh
+                    state["current"] = info
+
+                vc = await ensure_voice(guild, state)
+                if vc is None:
+                    await channel.send("Could not reconnect to voice channel — stopping playback.")
+                    clear_queue(state)
+                    return
+
+                if not announced:
+                    await channel.send(f"Now playing: **{title}**")
+                    announced = True
+                elif attempt > 0:
+                    await channel.send(f"Reconnected — resuming **{title}** (attempt {attempt + 1})")
+
+                err = await play_track(vc, info)
+
+                if err is None:
+                    break  # clean finish, move to next track
+
+                log.warning("Playback error on attempt %d for %r: %s", attempt + 1, title, err)
+                if attempt == 3:
+                    await channel.send(f"Playback failed after several attempts, skipping **{title}**.")
+
+            state["current"] = None
+
     except asyncio.CancelledError:
         vc = guild.voice_client
         if vc and vc.is_connected():
             await vc.disconnect()
     finally:
         state["task"] = None
+        state["current"] = None
 
 
 @bot.event
@@ -104,10 +192,12 @@ async def join(interaction: discord.Interaction):
         return
     await interaction.response.defer()
     channel = interaction.user.voice.channel
+    state = get_state(interaction.guild.id)
     if interaction.guild.voice_client:
         await interaction.guild.voice_client.move_to(channel)
     else:
         await channel.connect()
+    state["voice_channel"] = channel
     await interaction.followup.send(f"Joined **{channel.name}**.")
 
 
@@ -120,15 +210,18 @@ async def play(interaction: discord.Interaction, query: str):
 
     await interaction.response.defer()
 
+    voice_channel = interaction.user.voice.channel
+    state = get_state(interaction.guild.id)
+
     if not interaction.guild.voice_client:
-        await interaction.user.voice.channel.connect()
+        await voice_channel.connect()
+    state["voice_channel"] = voice_channel
 
     info = await fetch_info(query)
     if info is None:
         await interaction.followup.send("Could not find or extract audio for that link/query.")
         return
 
-    state = get_state(interaction.guild.id)
     await state["queue"].put(info)
     title = info.get("title", "Unknown")
 
@@ -194,6 +287,8 @@ async def queue_cmd(interaction: discord.Interaction):
 async def leave(interaction: discord.Interaction):
     state = get_state(interaction.guild.id)
     clear_queue(state)
+    if state["task"] and not state["task"].done():
+        state["task"].cancel()
     if interaction.guild.voice_client:
         await interaction.response.defer()
         await interaction.guild.voice_client.disconnect()
