@@ -1,0 +1,65 @@
+# ============================================================
+# Systemd service unit for the Music Discord Bot
+# Target OS: Manjaro Linux (or any systemd-based distro)
+#
+# SETUP INSTRUCTIONS
+# ------------------
+# 1. Edit the three variables below (User, WorkingDirectory, ExecStart).
+# 2. Copy this file to the systemd unit directory:
+#      sudo cp music-bot.service /etc/systemd/system/music-bot.service
+# 3. Reload systemd and start the service:
+#      sudo systemctl daemon-reload
+#      sudo systemctl start music-bot
+# 4. Optionally enable auto-start on boot:
+#      sudo systemctl enable music-bot
+# 5. Check logs:
+#      journalctl -u music-bot -f
+# ============================================================
+
+[Unit]
+Description=Music Discord Bot
+Documentation=https://github.com/YOUR_USERNAME/Music_Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- EDIT THESE THREE LINES ---
+User=YOUR_LINUX_USER
+WorkingDirectory=/home/YOUR_LINUX_USER/Music_Bot
+ExecStart=/home/YOUR_LINUX_USER/Music_Bot/.venv/bin/python bot.py
+# ------------------------------
+
+# Load DISCORD_TOKEN (and any other vars) from .env
+# Note: systemd EnvironmentFile uses plain KEY=VALUE pairs.
+# Values must NOT be wrapped in quotes in this file.
+# Example valid line:  DISCORD_TOKEN=abcdef123456
+EnvironmentFile=/home/YOUR_LINUX_USER/Music_Bot/.env
+
+# Restart policy — revive after crashes, give up after 5 attempts in 5 min
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitInterval=300
+
+# Kill slow-to-stop processes cleanly
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Logging — view with: journalctl -u music-bot -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=music-bot
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# Allow writes only inside the project directory (needed for yt-dlp cache)
+ReadWritePaths=/home/YOUR_LINUX_USER/Music_Bot
+
+[Install]
+WantedBy=multi-user.target
