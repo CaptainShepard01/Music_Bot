@@ -11,10 +11,10 @@ A Discord slash-command music bot that streams audio from YouTube via yt-dlp and
 | FFmpeg | Must be on `PATH` (`ffmpeg`, `ffprobe`) |
 | A Discord bot token | [discord.com/developers](https://discord.com/developers/applications) |
 
-On Manjaro / Arch Linux:
+On Manjaro / Arch Linux (if not already installed):
 ```bash
-sudo pacman -S python ffmpeg
-curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo pacman -S ffmpeg       # skip if ffmpeg --version already works
+curl -LsSf https://astral.sh/uv/install.sh | sh   # skip if uv is already installed
 ```
 
 ## Installation
