@@ -57,31 +57,22 @@ python bot.py
 
 ## Running as a systemd service on Manjaro Linux
 
-A ready-to-use unit file is included at `music-bot.service`.
+Run the install script from inside the project directory — it auto-detects your user, working directory, and venv Python path:
 
-1. Open the file and replace the three placeholder values:
-   - `User=YOUR_LINUX_USER`
-   - `WorkingDirectory=` and `ExecStart=` paths
-   - `EnvironmentFile=` path
+```bash
+chmod +x install-service.sh
+./install-service.sh
+```
 
-2. Install and start:
-   ```bash
-   sudo cp music-bot.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl start music-bot
-   ```
+Then start and (optionally) enable the service:
 
-3. Enable auto-start on boot (optional):
-   ```bash
-   sudo systemctl enable music-bot
-   ```
+```bash
+sudo systemctl start music-bot
+sudo systemctl enable music-bot  # auto-start on boot
+journalctl -u music-bot -f       # follow logs
+```
 
-4. Follow logs in real time:
-   ```bash
-   journalctl -u music-bot -f
-   ```
-
-> **Note:** `systemd`'s `EnvironmentFile` directive reads `KEY=VALUE` pairs literally — do **not** wrap values in quotes inside `.env` when used with systemd.
+> **Note:** systemd's `EnvironmentFile` reads `KEY=VALUE` pairs literally — do **not** wrap values in quotes in `.env` when using systemd (a plain `DISCORD_TOKEN=abc123` is fine).
 
 ## Commands
 
