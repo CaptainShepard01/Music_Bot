@@ -50,6 +50,10 @@ def clear_queue(state: dict) -> None:
         state["queue"].task_done()
 
 
+def _is_url(query: str) -> bool:
+    return query.startswith("http://") or query.startswith("https://")
+
+
 async def fetch_info(query: str) -> dict | None:
     loop = asyncio.get_running_loop()
 
@@ -64,6 +68,20 @@ async def fetch_info(query: str) -> dict | None:
     if "entries" in info:
         info = info["entries"][0]
     return info
+
+
+async def fetch_search_results(query: str, max_results: int = 5) -> list[dict]:
+    loop = asyncio.get_running_loop()
+
+    def _extract() -> dict:
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as y:
+            return y.extract_info(f"ytsearch{max_results}:{query}", download=False)
+
+    try:
+        result = await loop.run_in_executor(None, _extract)
+    except yt_dlp.utils.DownloadError:
+        return []
+    return [e for e in result.get("entries", []) if e]
 
 
 async def ensure_voice(guild: discord.Guild, state: dict) -> discord.VoiceClient | None:
@@ -178,6 +196,61 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
         state["current"] = None
 
 
+class SearchSelectView(discord.ui.View):
+    def __init__(
+        self,
+        results: list[dict],
+        guild: discord.Guild,
+        state: dict,
+        text_channel: discord.TextChannel,
+    ):
+        super().__init__(timeout=60)
+        self.results = results
+        self.guild = guild
+        self.state = state
+        self.text_channel = text_channel
+        self.message: discord.Message | None = None
+
+        options = []
+        for i, info in enumerate(results):
+            title = (info.get("title") or "Unknown")[:100]
+            duration = info.get("duration") or 0
+            mins, secs = divmod(int(duration), 60)
+            uploader = (info.get("uploader") or "")[:50]
+            desc = f"{uploader} • {mins}:{secs:02d}" if uploader else f"{mins}:{secs:02d}"
+            options.append(discord.SelectOption(label=title, value=str(i), description=desc[:100]))
+
+        select = discord.ui.Select(placeholder="Choose a song…", options=options)
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        idx = int(interaction.data["values"][0])
+        info = self.results[idx]
+        title = info.get("title") or "Unknown"
+
+        await self.state["queue"].put(info)
+
+        if self.state["task"] is None or self.state["task"].done():
+            self.state["task"] = asyncio.ensure_future(
+                player_loop(self.guild, self.text_channel)
+            )
+            content = f"Loading: **{title}**"
+        else:
+            pos = self.state["queue"].qsize()
+            content = f"Added to queue (#{pos}): **{title}**"
+
+        await interaction.response.edit_message(content=content, view=None)
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        if self.message:
+            try:
+                await self.message.edit(content="Search timed out.", view=None)
+            except discord.HTTPException:
+                pass
+
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
@@ -216,6 +289,16 @@ async def play(interaction: discord.Interaction, query: str):
     if not interaction.guild.voice_client:
         await voice_channel.connect()
     state["voice_channel"] = voice_channel
+
+    if not _is_url(query):
+        results = await fetch_search_results(query)
+        if not results:
+            await interaction.followup.send("No results found for that search.")
+            return
+        view = SearchSelectView(results, interaction.guild, state, interaction.channel)
+        msg = await interaction.followup.send("Select a song:", view=view)
+        view.message = msg
+        return
 
     info = await fetch_info(query)
     if info is None:
