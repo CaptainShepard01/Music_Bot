@@ -226,6 +226,17 @@ class SearchSelectView(discord.ui.View):
         select.callback = self._on_select
         self.add_item(select)
 
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    async def _on_cancel(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message("Only the person who searched can cancel.", ephemeral=True)
+            return
+        await interaction.response.edit_message(content="Search cancelled.", view=None)
+        self.stop()
+
     async def _on_select(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.invoker_id:
             await interaction.response.send_message("Only the person who searched can pick a song.", ephemeral=True)
