@@ -203,12 +203,14 @@ class SearchSelectView(discord.ui.View):
         guild: discord.Guild,
         state: dict,
         text_channel: discord.TextChannel,
+        invoker_id: int,
     ):
         super().__init__(timeout=60)
         self.results = results
         self.guild = guild
         self.state = state
         self.text_channel = text_channel
+        self.invoker_id = invoker_id
         self.message: discord.Message | None = None
 
         options = []
@@ -225,6 +227,10 @@ class SearchSelectView(discord.ui.View):
         self.add_item(select)
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message("Only the person who searched can pick a song.", ephemeral=True)
+            return
+
         idx = int(interaction.data["values"][0])
         info = self.results[idx]
         title = info.get("title") or "Unknown"
@@ -295,7 +301,7 @@ async def play(interaction: discord.Interaction, query: str):
         if not results:
             await interaction.followup.send("No results found for that search.")
             return
-        view = SearchSelectView(results, interaction.guild, state, interaction.channel)
+        view = SearchSelectView(results, interaction.guild, state, interaction.channel, interaction.user.id)
         msg = await interaction.followup.send("Select a song:", view=view)
         view.message = msg
         return
