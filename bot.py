@@ -136,6 +136,18 @@ async def play_track(vc: discord.VoiceClient, info: dict) -> Exception | None:
 
 async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> None:
     state = get_state(guild.id)
+    now_playing_msg: discord.Message | None = None
+
+    async def update_now_playing(content: str) -> None:
+        nonlocal now_playing_msg
+        if now_playing_msg:
+            try:
+                await now_playing_msg.edit(content=content)
+                return
+            except discord.HTTPException:
+                pass
+        now_playing_msg = await channel.send(content)
+
     try:
         while True:
             try:
@@ -144,7 +156,7 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                 vc = guild.voice_client
                 if vc:
                     await vc.disconnect()
-                await channel.send("Left voice channel due to inactivity.")
+                await update_now_playing("Left voice channel due to inactivity.")
                 break
 
             state["current"] = info
@@ -171,10 +183,10 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                     return
 
                 if not announced:
-                    await channel.send(f"Now playing: **{title}**")
+                    await update_now_playing(f"Now playing: **{title}**")
                     announced = True
                 elif attempt > 0:
-                    await channel.send(f"Reconnected — resuming **{title}** (attempt {attempt + 1})")
+                    await update_now_playing(f"Now playing: **{title}** (reconnected, attempt {attempt + 1})")
 
                 err = await play_track(vc, info)
 
@@ -375,12 +387,16 @@ async def stop(interaction: discord.Interaction):
 @bot.tree.command(name="queue", description="Show the current queue")
 async def queue_cmd(interaction: discord.Interaction):
     state = get_state(interaction.guild.id)
+    current = state.get("current")
     items = list(state["queue"]._queue)
-    if not items:
+    if not current and not items:
         await interaction.response.send_message("The queue is empty.")
         return
-    lines = [f"{i + 1}. **{item.get('title', 'Unknown')}**" for i, item in enumerate(items)]
-    await interaction.response.send_message("Queue:\n" + "\n".join(lines))
+    lines = []
+    if current:
+        lines.append(f"Now playing: **{current.get('title', 'Unknown')}**")
+    lines += [f"{i + 1}. **{item.get('title', 'Unknown')}**" for i, item in enumerate(items)]
+    await interaction.response.send_message("\n".join(lines))
 
 
 @bot.tree.command(name="leave", description="Disconnect the bot from voice")
