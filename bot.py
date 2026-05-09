@@ -40,6 +40,8 @@ def get_state(guild_id: int) -> dict:
             "task": None,
             "voice_channel": None,  # last known VoiceChannel; used to rejoin after drop
             "current": None,        # info dict of the track currently playing
+            "alone_task": None,     # pending task to disconnect when bot is alone
+            "text_channel": None,   # last text channel used for commands
         }
     return guild_state[guild_id]
 
@@ -275,6 +277,49 @@ async def on_ready():
     print("Slash commands synced.")
 
 
+@bot.event
+async def on_voice_state_update(
+    member: discord.Member, _before: discord.VoiceState, _after: discord.VoiceState
+):
+    guild = member.guild
+    vc = guild.voice_client
+    if not vc or not vc.channel:
+        return
+
+    human_members = [m for m in vc.channel.members if not m.bot]
+    state = get_state(guild.id)
+
+    if human_members:
+        alone_task = state.get("alone_task")
+        if alone_task and not alone_task.done():
+            alone_task.cancel()
+        state["alone_task"] = None
+        return
+
+    # Bot is alone — start the 30-second grace period if not already running
+    if state.get("alone_task") and not state["alone_task"].done():
+        return
+
+    async def _leave_if_alone() -> None:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            return
+        vc2 = guild.voice_client
+        if vc2 and vc2.channel:
+            if not any(not m.bot for m in vc2.channel.members):
+                clear_queue(state)
+                if state["task"] and not state["task"].done():
+                    state["task"].cancel()
+                await vc2.disconnect()
+                text_ch = state.get("text_channel")
+                if text_ch:
+                    await text_ch.send("Everyone left — disconnected from voice.")
+        state["alone_task"] = None
+
+    state["alone_task"] = asyncio.ensure_future(_leave_if_alone())
+
+
 @bot.tree.command(name="join", description="Join your current voice channel")
 async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
@@ -288,6 +333,7 @@ async def join(interaction: discord.Interaction):
     else:
         await channel.connect()
     state["voice_channel"] = channel
+    state["text_channel"] = interaction.channel
     await interaction.followup.send(f"Joined **{channel.name}**.")
 
 
@@ -306,6 +352,7 @@ async def play(interaction: discord.Interaction, query: str):
     if not interaction.guild.voice_client:
         await voice_channel.connect()
     state["voice_channel"] = voice_channel
+    state["text_channel"] = interaction.channel
 
     if not _is_url(query):
         results = await fetch_search_results(query)
