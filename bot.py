@@ -302,7 +302,7 @@ async def on_voice_state_update(
 
     async def _leave_if_alone() -> None:
         try:
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
         except asyncio.CancelledError:
             return
         vc2 = guild.voice_client
