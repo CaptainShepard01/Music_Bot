@@ -193,6 +193,13 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
         vc = guild.voice_client
         if vc and vc.is_connected():
             await vc.disconnect()
+    except Exception as exc:
+        log.error("Player loop crashed: %s", exc, exc_info=True)
+        try:
+            text_ch = state.get("text_channel") or channel
+            await text_ch.send("Playback stopped due to an unexpected error. Use /play to resume the queue.")
+        except Exception:
+            pass
     finally:
         state["task"] = None
         state["current"] = None
