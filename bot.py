@@ -296,7 +296,6 @@ async def on_voice_state_update(
         state["alone_task"] = None
         return
 
-    # Bot is alone — start the 30-second grace period if not already running
     if state.get("alone_task") and not state["alone_task"].done():
         return
 
@@ -404,6 +403,7 @@ async def resume(interaction: discord.Interaction):
 async def skip(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and (vc.is_playing() or vc.is_paused()):
+        get_state(interaction.guild.id)["current"] = None
         vc.stop()
         await interaction.response.send_message("Skipped.")
     else:
