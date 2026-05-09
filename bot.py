@@ -136,18 +136,6 @@ async def play_track(vc: discord.VoiceClient, info: dict) -> Exception | None:
 
 async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> None:
     state = get_state(guild.id)
-    now_playing_msg: discord.Message | None = None
-
-    async def update_now_playing(content: str) -> None:
-        nonlocal now_playing_msg
-        if now_playing_msg:
-            try:
-                await now_playing_msg.edit(content=content)
-                return
-            except discord.HTTPException:
-                pass
-        now_playing_msg = await channel.send(content)
-
     try:
         while True:
             try:
@@ -156,7 +144,7 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                 vc = guild.voice_client
                 if vc:
                     await vc.disconnect()
-                await update_now_playing("Left voice channel due to inactivity.")
+                await channel.send("Left voice channel due to inactivity.")
                 break
 
             state["current"] = info
@@ -183,10 +171,10 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                     return
 
                 if not announced:
-                    await update_now_playing(f"Now playing: **{title}**")
+                    await channel.send(f"Now playing: **{title}**")
                     announced = True
                 elif attempt > 0:
-                    await update_now_playing(f"Now playing: **{title}** (reconnected, attempt {attempt + 1})")
+                    await channel.send(f"Reconnected — resuming **{title}** (attempt {attempt + 1})")
 
                 err = await play_track(vc, info)
 
