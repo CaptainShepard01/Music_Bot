@@ -167,6 +167,10 @@ This project is intended for personal, self-hosted use. You are responsible for
 ensuring your usage complies with [YouTube's Terms of Service](https://www.youtube.com/t/terms)
 and the laws in your jurisdiction.
 
+## Author
+
+Created and maintained by **Anton Balykov** ([@CaptainShepard01](https://github.com/CaptainShepard01)).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
