@@ -204,7 +204,8 @@ class Music(commands.Cog):
         gid = interaction.guild.id
         state = player.get_state(gid)
 
-        if not interaction.guild.voice_client:
+        vc = interaction.guild.voice_client
+        if not vc:
             await interaction.response.send_message("I'm not in a voice channel.")
             return
 
@@ -216,7 +217,10 @@ class Music(commands.Cog):
         if state["task"] and not state["task"].done():
             state["task"].cancel()
         await interaction.response.defer()
-        await interaction.guild.voice_client.disconnect()
+        # Cancelling the task above can already disconnect us (which nulls
+        # guild.voice_client), so use the captured handle and guard the call.
+        if vc.is_connected():
+            await vc.disconnect()
 
         if not had_content:
             await session.clear(gid)

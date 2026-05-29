@@ -160,21 +160,31 @@ async def ensure_voice(guild: discord.Guild, state: dict) -> discord.VoiceClient
     deadline = time.monotonic() + RECONNECT_DEADLINE
     delay = 5
     while time.monotonic() < deadline:
-        # Re-resolve from cache: once the gateway resumes after an outage the
-        # channel's member list refreshes, so this reflects who is really there.
         channel = guild.get_channel(voice_channel.id) or voice_channel
-        if _has_human(channel):
-            try:
-                if guild.voice_client:
-                    await guild.voice_client.disconnect(force=True)
-                vc = await channel.connect()
-                state["voice_channel"] = channel
-                return vc
-            except Exception as exc:
-                log.warning("Voice reconnect attempt failed: %s", exc)
-        await asyncio.sleep(delay)
-        delay = min(delay * 2, 60)  # 5, 10, 20, 40, 60, 60 … s
+        try:
+            # Tear down any half-dead client left over from the drop, then connect.
+            # While the gateway is down this raises and we retry; it only succeeds
+            # once the internet is genuinely back.
+            if guild.voice_client:
+                await guild.voice_client.disconnect(force=True)
+            vc = await channel.connect(timeout=30.0)
+        except Exception as exc:
+            log.warning("Voice reconnect attempt failed: %s", exc)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)  # 5, 10, 20, 40, 60, 60 … s
+            continue
 
+        state["voice_channel"] = channel
+        # Connected with a fresh gateway session, so the member list is current —
+        # only stay if a human is actually here, otherwise give up (park).
+        if _has_human(channel):
+            log.info("Reconnected to voice in guild %s.", guild.id)
+            return vc
+        await vc.disconnect(force=True)
+        log.info("Reconnected but %s is empty — giving up.", channel.name)
+        return None
+
+    log.warning("Reconnect window (%ss) elapsed for guild %s.", RECONNECT_DEADLINE, guild.id)
     return None
 
 
@@ -218,38 +228,17 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                 await channel.send("Left voice channel due to inactivity.")
                 break
 
-            # Lazy resolution: playlist entries carry only a webpage URL/title, not
-            # an expiring stream URL. Resolve it now so play_track has info["url"].
-            if "url" not in info:
-                ref = info.get("webpage_url") or info.get("title")
-                resolved = await fetch_info(ref) if ref else None
-                if resolved is None:
-                    await channel.send(
-                        f"Skipping **{info.get('title', 'Unknown')}** — couldn't load it."
-                    )
-                    continue
-                # Keep the stored title if the resolved info is missing one.
-                resolved.setdefault("title", info.get("title", "Unknown"))
-                info = resolved
-
             state["current"] = info
             persist(guild.id)
             title = info.get("title", "Unknown")
             announced = False
+            resumed_notified = False
+            failures = 0
 
-            for attempt in range(4):  # first try + up to 3 retries
-                if attempt > 0:
-                    await asyncio.sleep(5 * attempt)  # 5 s, 10 s, 15 s back-off
-
-                    # Re-fetch a fresh stream URL — the previous one may have expired
-                    ref = info.get("webpage_url") or info.get("original_url") or title
-                    fresh = await fetch_info(ref)
-                    if fresh is None:
-                        await channel.send(f"Could not recover stream for **{title}**, skipping.")
-                        break
-                    info = fresh
-                    state["current"] = info
-
+            while True:
+                # 1. Connect first. After an internet drop this blocks (up to
+                #    RECONNECT_DEADLINE) until the link is back and a human is
+                #    present, so every network call below runs while we're online.
                 vc = await ensure_voice(guild, state)
                 if vc is None:
                     await park(guild.id)
@@ -259,20 +248,63 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                     )
                     return
 
+                # 2. Resolve a fresh stream URL if we don't have one: a lazy queue/
+                #    playlist entry, or one we dropped after a playback error/outage.
+                #    (Stream URLs expire, so we always re-fetch after a failure.)
+                if "url" not in info:
+                    ref = info.get("webpage_url") or info.get("original_url") or info.get("title") or title
+                    resolved = await fetch_info(ref) if ref else None
+                    if resolved is None:
+                        failures += 1
+                        if failures >= 3:
+                            await channel.send(f"Couldn't load **{title}**, skipping.")
+                            break
+                        await asyncio.sleep(5)
+                        continue
+                    resolved.setdefault("title", title)
+                    info = resolved
+                    state["current"] = info
+
+                # 3. Play it.
                 if not announced:
                     await channel.send(f"Now playing: **{title}**")
                     announced = True
-                elif attempt > 0:
-                    await channel.send(f"Reconnected — resuming **{title}** (attempt {attempt + 1})")
+                elif not resumed_notified:
+                    await channel.send(f"Reconnected — resuming **{title}**.")
+                    resumed_notified = True
 
+                start = time.monotonic()
                 err = await play_track(vc, info)
+                elapsed = time.monotonic() - start
 
-                if err is None:
-                    break  # clean finish, move to next track
+                # A long outage invalidates the gateway session and kills the voice
+                # connection; play_track's `after` can then fire with no error even
+                # though the song was cut short. So a "clean finish" only counts if
+                # we're still connected and the track actually ran its length.
+                disconnected = not (guild.voice_client and guild.voice_client.is_connected())
+                duration = info.get("duration") or 0
+                ended_early = bool(duration) and elapsed < duration - 10
 
-                log.warning("Playback error on attempt %d for %r: %s", attempt + 1, title, err)
-                if attempt == 3:
-                    await channel.send(f"Playback failed after several attempts, skipping **{title}**.")
+                if err is None and not disconnected and not ended_early:
+                    break  # genuine clean finish — move to the next track
+
+                # Otherwise the track was cut short (a dropped connection, or a real
+                # playback error). Drop the stale URL so the next pass re-fetches and
+                # loop — ensure_voice will wait out any outage before we retry.
+                if err is not None:
+                    log.warning("Playback error for %r: %s", title, err)
+                else:
+                    log.warning(
+                        "Playback of %r ended after %.0fs of %ss — treating as a drop, resuming.",
+                        title, elapsed, duration or "?",
+                    )
+                failures += 1
+                if failures >= 6:
+                    await channel.send(f"Couldn't keep **{title}** playing, skipping.")
+                    break
+                info.pop("url", None)
+                resumed_notified = False
+                await asyncio.sleep(3)
 
             state["current"] = None
             persist(guild.id)  # queue advanced; reflect the new head on disk
