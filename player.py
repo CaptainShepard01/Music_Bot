@@ -43,6 +43,7 @@ def get_state(guild_id: int) -> dict:
             "task": None,
             "voice_channel": None,  # last known VoiceChannel; used to rejoin after drop
             "current": None,        # info dict of the track currently playing
+            "stop_requested": False,  # set by commands to intentionally stop current playback
             "alone_task": None,     # pending task to disconnect when bot is alone
             "text_channel": None,   # last text channel used for commands
             "persist_enabled": True,  # gate disk persistence while parking/stopping
@@ -277,6 +278,13 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                 err = await play_track(vc, info)
                 elapsed = time.monotonic() - start
 
+                # Commands like /skip (or a queue replace) intentionally stop the
+                # current source. Treat that as a clean skip rather than a dropped
+                # connection that should be retried.
+                if state.get("stop_requested"):
+                    state["stop_requested"] = False
+                    break
+
                 # A long outage invalidates the gateway session and kills the voice
                 # connection; play_track's `after` can then fire with no error even
                 # though the song was cut short. So a "clean finish" only counts if
@@ -347,6 +355,7 @@ async def enqueue_and_start(
         clear_queue(state)
         vc = guild.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
+            state["stop_requested"] = True
             state["current"] = None
             vc.stop()
 

@@ -149,7 +149,8 @@ class Music(commands.Cog):
     async def skip(self, interaction: discord.Interaction):
         vc = interaction.guild.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
-            player.get_state(interaction.guild.id)["current"] = None
+            state = player.get_state(interaction.guild.id)
+            state["stop_requested"] = True
             vc.stop()
             await interaction.response.send_message("Skipped.")
         else:
@@ -163,8 +164,10 @@ class Music(commands.Cog):
         snap = player._snapshot(state)  # capture before clearing
         state["persist_enabled"] = False
         player.clear_queue(state)
-        if interaction.guild.voice_client:
-            interaction.guild.voice_client.stop()
+        vc = interaction.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            state["stop_requested"] = True
+            vc.stop()
         state["current"] = None
 
         if not had_content:
