@@ -6,11 +6,17 @@ Both the Music and Playlist cogs build on the functions here.
 import asyncio
 import logging
 import random
+import time
 
 import discord
 import yt_dlp
 
+import session
+
 log = logging.getLogger(__name__)
+
+# How long ensure_voice keeps trying to reconnect after a drop before giving up.
+RECONNECT_DEADLINE = 600  # 10 minutes
 
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -39,6 +45,7 @@ def get_state(guild_id: int) -> dict:
             "current": None,        # info dict of the track currently playing
             "alone_task": None,     # pending task to disconnect when bot is alone
             "text_channel": None,   # last text channel used for commands
+            "persist_enabled": True,  # gate disk persistence while parking/stopping
         }
     return guild_state[guild_id]
 
@@ -47,6 +54,57 @@ def clear_queue(state: dict) -> None:
     while not state["queue"].empty():
         state["queue"].get_nowait()
         state["queue"].task_done()
+
+
+def _to_entry(info: dict) -> dict:
+    """Lightweight ``{webpage_url, title}`` form used for persistence and lazy
+    resolution (the same shape ``player_loop`` resolves on the fly)."""
+    return {
+        "webpage_url": info.get("webpage_url") or info.get("original_url") or info.get("url"),
+        "title": info.get("title", "Unknown"),
+    }
+
+
+def _snapshot(state: dict) -> dict:
+    current = state.get("current")
+    voice_channel = state.get("voice_channel")
+    text_channel = state.get("text_channel")
+    return {
+        "voice_channel_id": voice_channel.id if voice_channel else None,
+        "text_channel_id": text_channel.id if text_channel else None,
+        "current": _to_entry(current) if current else None,
+        "queue": [_to_entry(item) for item in list(state["queue"]._queue)],
+    }
+
+
+def persist(guild_id: int) -> None:
+    """Schedule a fire-and-forget write of the guild's live state to disk.
+
+    No-op while a guild is being parked/stopped so the player loop can't
+    overwrite a freshly-parked session with empty state."""
+    state = get_state(guild_id)
+    if not state.get("persist_enabled", True):
+        return
+    asyncio.ensure_future(
+        session.save_guild(guild_id, auto_resume=True, **_snapshot(state))
+    )
+
+
+async def park(guild_id: int) -> None:
+    """Freeze a guild's live state and persist it parked for a later /continue."""
+    state = get_state(guild_id)
+    state["persist_enabled"] = False
+    await session.save_guild(guild_id, auto_resume=False, **_snapshot(state))
+
+
+async def discard(guild_id: int) -> None:
+    """Stop persisting and forget any saved session for the guild."""
+    get_state(guild_id)["persist_enabled"] = False
+    await session.clear(guild_id)
+
+
+def _has_human(channel: discord.VoiceChannel | None) -> bool:
+    return channel is not None and any(not m.bot for m in channel.members)
 
 
 def _is_url(query: str) -> bool:
@@ -84,7 +142,13 @@ async def fetch_search_results(query: str, max_results: int = 5) -> list[dict]:
 
 
 async def ensure_voice(guild: discord.Guild, state: dict) -> discord.VoiceClient | None:
-    """Return a live VoiceClient, reconnecting with backoff if the connection dropped."""
+    """Return a live VoiceClient, reconnecting after a drop for up to
+    ``RECONNECT_DEADLINE`` seconds.
+
+    Reconnection is only attempted while at least one human is in the target
+    channel — an internet blip during which everyone leaves should not drag the
+    bot back in. Returns ``None`` if the window elapses without a successful,
+    member-present reconnect (the caller then parks the queue for /continue)."""
     vc = guild.voice_client
     if vc and vc.is_connected():
         return vc
@@ -93,16 +157,23 @@ async def ensure_voice(guild: discord.Guild, state: dict) -> discord.VoiceClient
     if voice_channel is None:
         return None
 
-    # Exponential backoff: try immediately, then after 5 s, 15 s, 30 s
-    for delay in (0, 5, 15, 30):
-        if delay:
-            await asyncio.sleep(delay)
-        try:
-            if guild.voice_client:
-                await guild.voice_client.disconnect(force=True)
-            return await voice_channel.connect()
-        except Exception as exc:
-            log.warning("Voice reconnect attempt failed: %s", exc)
+    deadline = time.monotonic() + RECONNECT_DEADLINE
+    delay = 5
+    while time.monotonic() < deadline:
+        # Re-resolve from cache: once the gateway resumes after an outage the
+        # channel's member list refreshes, so this reflects who is really there.
+        channel = guild.get_channel(voice_channel.id) or voice_channel
+        if _has_human(channel):
+            try:
+                if guild.voice_client:
+                    await guild.voice_client.disconnect(force=True)
+                vc = await channel.connect()
+                state["voice_channel"] = channel
+                return vc
+            except Exception as exc:
+                log.warning("Voice reconnect attempt failed: %s", exc)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 60)  # 5, 10, 20, 40, 60, 60 … s
 
     return None
 
@@ -140,6 +211,7 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
             try:
                 info = await asyncio.wait_for(state["queue"].get(), timeout=300)
             except asyncio.TimeoutError:
+                await discard(guild.id)  # nothing left to resume
                 vc = guild.voice_client
                 if vc:
                     await vc.disconnect()
@@ -161,6 +233,7 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                 info = resolved
 
             state["current"] = info
+            persist(guild.id)
             title = info.get("title", "Unknown")
             announced = False
 
@@ -179,8 +252,11 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
 
                 vc = await ensure_voice(guild, state)
                 if vc is None:
-                    await channel.send("Could not reconnect to voice channel — stopping playback.")
-                    clear_queue(state)
+                    await park(guild.id)
+                    await channel.send(
+                        "Couldn't get back into voice within 10 minutes — saved the queue. "
+                        "Use `/continue` to resume it later."
+                    )
                     return
 
                 if not announced:
@@ -199,6 +275,7 @@ async def player_loop(guild: discord.Guild, channel: discord.TextChannel) -> Non
                     await channel.send(f"Playback failed after several attempts, skipping **{title}**.")
 
             state["current"] = None
+            persist(guild.id)  # queue advanced; reflect the new head on disk
 
     except asyncio.CancelledError:
         vc = guild.voice_client
@@ -232,6 +309,7 @@ async def enqueue_and_start(
     """
     state = get_state(guild.id)
     state["text_channel"] = text_channel
+    state["persist_enabled"] = True  # resuming/queuing makes the session live again
 
     if replace:
         clear_queue(state)
@@ -250,6 +328,7 @@ async def enqueue_and_start(
     if state["task"] is None or state["task"].done():
         state["task"] = asyncio.ensure_future(player_loop(guild, text_channel))
 
+    persist(guild.id)
     return len(tracks)
 
 

@@ -12,8 +12,9 @@ commands. Built with [discord.py](https://github.com/Rapptz/discord.py),
 - 🎵 **Stream from YouTube** — play a direct link or search by keywords and pick from a dropdown
 - 📋 **Per-guild queues** — append, view, skip, pause/resume, and clear the queue
 - 💾 **Shared playlists** — save tracks into named playlists per server, then play them (with optional shuffle)
-- 🔁 **Resilient playback** — auto-reconnects with backoff and re-fetches expired stream URLs
-- 👋 **Auto-disconnect** — leaves when the channel empties or after 5 minutes of inactivity
+- 🔁 **Resilient playback** — survives internet drops by reconnecting for up to 10 minutes (whenever someone is still in the channel) and re-fetches expired stream URLs
+- 💿 **Resumable queue** — the live queue is saved to disk on every change, so a crash or restart picks up where it left off; `/stop` and `/leave` offer to save the queue for a later `/continue`
+- 👋 **Auto-disconnect** — leaves when the channel empties (saving the queue for `/continue` if one was playing) or after 5 minutes of inactivity
 
 ## Prerequisites
 
@@ -117,9 +118,10 @@ journalctl -u music-bot -f       # follow logs
 | `/pause` | Pause playback |
 | `/resume` | Resume paused playback |
 | `/skip` | Skip the current song |
-| `/stop` | Stop playback and clear the queue |
+| `/stop` | Stop playback and clear the queue (offers to save it for `/continue`) |
 | `/queue` | Show the current queue |
-| `/leave` | Disconnect the bot from voice |
+| `/continue` | Resume a previously saved queue |
+| `/leave` | Disconnect the bot from voice (offers to save the queue for `/continue`) |
 
 ### Playlists
 
@@ -136,7 +138,9 @@ Playlists are **shared per server** — anyone in the guild can view, edit, play
 | `/playlist play <name> [mode] [shuffle]` | Play a playlist (append or replace the queue, optionally shuffled) |
 | `/playlist delete <name>` | Delete a playlist (with confirmation) |
 
-Playlists are stored in `playlists.json` in the project directory.
+Playlists are stored in `playlists.json` in the project directory. The live
+playback queue is saved separately in `sessions.json` (also in the project
+directory) so it can be resumed after an outage or restart.
 
 ## Project structure
 
@@ -145,6 +149,7 @@ Music_Bot/
 ├── bot.py              # Entry point: loads cogs, syncs slash commands, runs the bot
 ├── player.py           # Playback engine: queue state, yt-dlp helpers, player loop
 ├── storage.py          # Persistent per-guild playlist storage (JSON)
+├── session.py          # Persistent live-queue state for crash/drop resume (JSON)
 ├── cogs/
 │   ├── music.py        # Playback and queue commands
 │   └── playlists.py    # /playlist command group
