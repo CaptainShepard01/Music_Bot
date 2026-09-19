@@ -5,6 +5,7 @@ UNIT=music-bot.service
 DEST=/etc/systemd/system/$UNIT
 
 export BOT_USER=$(whoami)
+export BOT_HOME=$HOME
 export BOT_DIR=$(realpath "$(dirname "$0")")
 export BOT_PYTHON="$BOT_DIR/.venv/bin/python"
 

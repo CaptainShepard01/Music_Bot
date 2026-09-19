@@ -9,6 +9,9 @@ User=${BOT_USER}
 WorkingDirectory=${BOT_DIR}
 ExecStart=${BOT_PYTHON} bot.py
 EnvironmentFile=${BOT_DIR}/.env
+# yt-dlp needs a JS runtime to solve YouTube's challenges; deno installs
+# to ~/.deno/bin, which is not on the default service PATH.
+Environment=PATH=${BOT_HOME}/.deno/bin:/usr/local/bin:/usr/bin:/bin
 
 Restart=on-failure
 RestartSec=10

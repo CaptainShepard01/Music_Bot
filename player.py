@@ -30,6 +30,10 @@ YDL_OPTIONS = {
     "default_search": "ytsearch",
     "socket_timeout": 15,
     "retries": 3,
+    # Let yt-dlp solve YouTube's signature/n challenges instead of falling back
+    # to whichever JS-free client is still unblocked. Needs a JS runtime (deno)
+    # on PATH; fetches the solver script from GitHub on first use.
+    "remote_components": ["ejs:github"],
 }
 
 # Per-guild state
