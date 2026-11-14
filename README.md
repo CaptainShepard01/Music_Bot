@@ -9,12 +9,12 @@ commands. Built with [discord.py](https://github.com/Rapptz/discord.py),
 
 ## Features
 
-- 🎛️ **Live player panel** — one "Now Playing" message with buttons for previous, pause/resume, skip, stop, queue, shuffle, loop, volume and save-to-playlist. It updates in place instead of flooding the channel.
+- 🎛️ **Live player panel** — one "Now Playing" message with buttons for previous, pause/resume, skip, stop, queue, shuffle, loop, volume, seek, save-to-playlist and playlists. It updates in place instead of flooding the channel, and floats back to the bottom of the chat a few seconds after other messages push it up.
 - 🔎 **Search as you type** — `/play` suggests YouTube results (and your saved playlists) while you type. Pick one, or just press Enter to play the top hit.
 - 🔗 **Links and playlists** — paste a video link or a whole YouTube playlist link (up to 200 tracks).
 - 📜 **Interactive queue** — browse pages, then play now, move up next, or remove any track; shuffle, clear, or save the whole queue as a playlist.
 - 💾 **Shared playlists** — save songs to named playlists per server, browse them, and play them (optionally shuffled).
-- 🔁 **Loop, history and seek** — loop the track or the whole queue; ⏮ goes back a track (or restarts the current one); `/seek` jumps to any time in the song (`1:30`, `+30`, `-10`).
+- 🔁 **Loop, history and seek** — loop the track or the whole queue; ⏮ goes back a track (or restarts the current one); ⏩ **Seek** jumps to any time in the song (`1:30`, `+30`, `-10`).
 - 🛟 **Resilient playback** — survives internet drops by reconnecting for up to 10 minutes while someone is still listening, then resumes **from where the song cut out**. The next track is preloaded so songs start without a gap.
 - ♻️ **Nothing gets lost** — the live queue is saved on every change, so a crash or restart picks up where it left off. Stopping, everyone leaving, or a failed reconnect saves the queue in a separate slot that new playback won't overwrite; bring it back with the **Resume** button or `/continue`.
 - 👋 **Auto-disconnect** — leaves 30 s after the channel empties (saving the queue) or after 5 minutes of silence.
@@ -115,38 +115,34 @@ journalctl -u music-bot -f       # follow logs
 
 ## Commands
 
-Most of the time you only need `/play`. Everything else is also on the player panel's buttons.
-
-### Playback
+There are only five commands — everything else is a button on the player panel.
 
 | Command | Description |
 |---------|-------------|
 | `/play <query> [next] [shuffle]` | Play a song, YouTube link, YouTube playlist link, or saved playlist. Suggestions appear as you type. Joins your voice channel automatically. `next` puts it at the front of the queue. |
-| `/pause` | Pause, or resume if paused |
-| `/skip [to]` | Skip the current song, or jump straight to a track in the queue |
-| `/seek <position>` | Jump to a time in the current song: `1:30`, `90`, or `+30` / `-10` relative to now (suggestions offer quick jumps) |
-| `/stop` | Stop, leave the voice channel, and save the queue for later |
-| `/queue` | Browse and manage the queue (play now, move up next, remove, shuffle, clear, save as playlist) |
-| `/nowplaying` | Bring the player panel to the bottom of the current channel |
-| `/volume [level]` | Show or set the volume (0–200%) |
-| `/continue` | Bring back the queue saved by the last stop |
+| `/continue` | Bring back the queue saved by the last stop (same as the **Resume** button on the "Stopped" card) |
+| `/nowplaying` | Bring the player panel into the current channel |
+| `/playlist view [name]` | Browse playlists, or open one (same as 📚 **Playlists** on the panel) |
+| `/playlist add <name> [query]` | Add a song (or a whole YouTube playlist) to a playlist without playing it. Leave `query` empty to add what's playing now. |
 
-Only people in the bot's voice channel can control playback.
+### Player panel
 
-### Playlists
+| Button | Does |
+|--------|------|
+| ⏮️ ⏸️ ⏭️ ⏹️ | Previous (or restart the song), pause/resume, skip, stop (leaves and saves the queue for later) |
+| 📜 **Queue** | Browse the queue: play now, move up next, remove, shuffle, clear, save as playlist |
+| 🔀 🔁 🔉 🔊 | Shuffle, loop (off → queue → track), volume down/up |
+| ⏩ **Seek** | Jump to a time: `1:30`, `90`, or `+30` / `-10` relative to now |
+| ⭐ **Save** | Add the current song to a playlist (or a new one) |
+| 📚 **Playlists** | Browse playlists: play / shuffle-play, remove songs, delete a playlist |
+
+Only people in the bot's voice channel can control playback. Button replies are
+private, so the channel only shows the panel and what got queued.
+
+The panel stays at the bottom of the channel: it's reposted when a new song
+starts, and a few seconds after chat (or a queued-song message) pushes it up.
 
 Playlists are **shared per server**: anyone in the server can view, edit, play, or delete them. They're created on the fly, with no separate "create" step.
-
-| Command | Description |
-|---------|-------------|
-| `/playlist play <name> [shuffle] [replace]` | Play a playlist (adds to the queue, or replaces it) |
-| `/playlist view [name]` | Browse all playlists, or open one, with Play / Shuffle buttons |
-| `/playlist add <name> [query]` | Add a song (or a whole YouTube playlist) to a playlist. Leave `query` empty to add what's playing now. |
-| `/playlist save <name>` | Save the current song plus the whole queue as a playlist |
-| `/playlist remove <name> <track>` | Remove a song from a playlist |
-| `/playlist delete <name>` | Delete a playlist (with confirmation) |
-
-The ⭐ **Save** button on the player panel adds the current song to any playlist (or a new one).
 
 Playlists are stored in `playlists.json` in the project directory. The live and
 saved playback queues are stored separately in `sessions.json`.

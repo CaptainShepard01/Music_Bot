@@ -12,10 +12,8 @@ import asyncio
 import discord
 from discord import app_commands
 
-import player
 import sources
 import storage
-import views
 from views import fmt_time
 
 # Value prefix marking a saved playlist picked from /play's suggestions.
@@ -101,58 +99,4 @@ async def playlist_name_or_new(interaction: discord.Interaction, current: str) -
     text = " ".join(current.split())
     if text and storage.resolve_name(interaction.guild_id, text) is None:
         choices.insert(0, Choice(name=_label(f"➕ New playlist “{text}”"), value=text[:100]))
-    return choices[:25]
-
-
-async def playlist_track(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
-    name = getattr(interaction.namespace, "name", None)
-    pl = storage.get(interaction.guild_id, name) if name else None
-    if not pl:
-        return []
-    text = current.casefold()
-    out = []
-    for i, t in enumerate(pl["tracks"]):
-        label = _label(f"{i + 1}. {t.get('title', 'Unknown')}")
-        if text in label.casefold():
-            out.append(Choice(name=label, value=str(i)))
-            if len(out) == 25:
-                break
-    return out
-
-
-async def queue_position(interaction: discord.Interaction, current: str) -> list[Choice[int]]:
-    gp = player.find(interaction.guild_id)
-    if gp is None:
-        return []
-    text = current.casefold()
-    out = []
-    for i, t in enumerate(gp.queue, 1):
-        label = _label(f"{i}. {t.title}")
-        if text in label.casefold():
-            out.append(Choice(name=label, value=i))
-            if len(out) == 25:
-                break
-    return out
-
-
-async def seek_position(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
-    """Quick jumps relative to the current position, plus whatever was typed."""
-    gp = player.find(interaction.guild_id)
-    if gp is None or gp.current is None or not gp.current.duration:
-        return []
-    pos, length = gp.position(), gp.current.duration
-    shortcuts = [("⏪ Back 10 s", "-10"), ("⏩ Forward 30 s", "+30"),
-                 ("⏩ Forward 1 min", "+60"), ("⏮ Restart", "0")]
-    choices = []
-    text = current.strip()
-    parsed = views.parse_time(text) if text else None
-    if parsed is not None:
-        seconds, relative = parsed
-        target = pos + seconds if relative else seconds
-        target = min(max(0, target), length)
-        choices.append(Choice(name=f"Jump to {fmt_time(target)}", value=text[:100]))
-    choices += [Choice(name=f"{label} → {fmt_time(min(max(0, pos + int(v)) if v[0] in '+-' else 0, length))}",
-                       value=v) for label, v in shortcuts]
-    choices.append(Choice(name=f"Now at {fmt_time(pos)} of {fmt_time(length)} — type a time like 1:30",
-                          value=str(int(pos))))
     return choices[:25]

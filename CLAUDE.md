@@ -33,8 +33,8 @@ uv venv && uv pip install -r requirements.txt   # setup (or sync after requireme
 | `autocomplete.py` | Autocomplete providers (live YouTube search, playlist names, queue positions) |
 | `session.py` | `sessions.json`: per guild `live` (auto-resumed after crash/restart) and `saved` (parked for `/continue`) slots |
 | `storage.py` | `playlists.json`: shared per-guild playlists (case-insensitive names) |
-| `cogs/music.py` | `/play /pause /skip /seek /stop /queue /nowplaying /volume /continue` + voice-state listener |
-| `cogs/playlists.py` | `/playlist play/view/add/save/remove/delete` |
+| `cogs/music.py` | `/play /nowplaying /continue` + voice-state and message listeners |
+| `cogs/playlists.py` | `/playlist view/add` |
 
 `player` and `views` import each other (module-level `import x`, attribute
 access only at call time, `from __future__ import annotations`). Keep it that
@@ -70,9 +70,17 @@ way; never `from player import …` inside `views` or the reverse.
 - Keep channels quiet: control commands reply **ephemerally**, and the panel
   footer (`gp._note(...)`) records who did what. Queueing replies are public
   (small green embed with the requester's avatar).
+- **Buttons first, no duplicate commands.** A slash command exists only when
+  there's no button for it (`/play`, `/continue`, `/nowplaying`,
+  `/playlist view/add`). New controls go on the panel, `QueueView` or
+  `PlaylistBrowser`, not into new commands.
 - There is one live panel per guild. `gp.update_panel(move_to_bottom=True)` on
   track change edits it in place if it's still the latest message, otherwise
   reposts it. Other changes call `gp.schedule_panel_update()` (debounced 1 s).
+- The panel is sticky: `on_message` → `gp.on_channel_message` reposts a buried
+  panel once the channel has been quiet for `STICKY_QUIET` s (at most
+  `STICKY_MAX_WAIT` s during busy chat). Every panel edit, repost and close goes
+  through `gp._panel_lock`, so two of them can't double-post.
 - Errors: plain `⚠️ …` text; public errors after a deferred `/play` auto-delete
   (`reply(..., delete_after=20)`).
 - Escape user and YouTube text with `views.clean()` / `views.link()` before it

@@ -1,11 +1,11 @@
 """Everything the user sees: formatting helpers, embeds and interactive views.
 
 * ``PlayerControls``  — buttons on the live "Now Playing" panel (persistent)
+* ``SeekModal``       — "jump to a time" form behind the panel's Seek button
 * ``SavedQueueView``  — Resume / Discard on the card left after a stop (persistent)
 * ``QueueView``       — paginated queue browser with per-track actions
 * ``AddToPlaylistView`` / ``PlaylistNameModal`` — save tracks to a playlist
-* ``PlaylistBrowser`` — browse playlists and play them
-* ``ConfirmView``     — generic yes/no
+* ``PlaylistBrowser`` — browse playlists: play, remove songs, delete a playlist
 
 Persistent views use fixed ``custom_id``s (prefix ``mb:``) and are registered in
 ``bot.setup_hook`` so their buttons keep working after a restart.
@@ -323,6 +323,7 @@ class PlayerControls(discord.ui.View):
         )
         self.volume_down_btn.disabled = gp.volume <= 0
         self.volume_up_btn.disabled = gp.volume >= player.VOLUME_MAX
+        self.seek_btn.disabled = not active or not gp.current.duration
         self.save_btn.disabled = not active
 
     async def _player(self, interaction: discord.Interaction, *, control: bool = True) -> GuildPlayer | None:
@@ -417,7 +418,16 @@ class PlayerControls(discord.ui.View):
         gp.set_volume(gp.volume + VOLUME_STEP, interaction.user.display_name)
         await self._refresh(interaction, gp)
 
-    @discord.ui.button(emoji="⭐", label="Save", style=discord.ButtonStyle.secondary, custom_id="mb:save", row=1)
+    @discord.ui.button(emoji="⏩", label="Seek", style=discord.ButtonStyle.secondary, custom_id="mb:seek", row=2)
+    async def seek_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if (gp := await self._player(interaction)) is None:
+            return
+        if gp.current is None or not gp.current.duration:
+            await reply(interaction, "This track can't be sought (it's live or nothing is playing).")
+            return
+        await interaction.response.send_modal(SeekModal(gp))
+
+    @discord.ui.button(emoji="⭐", label="Save", style=discord.ButtonStyle.secondary, custom_id="mb:save", row=2)
     async def save_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if (gp := await self._player(interaction, control=False)) is None:
             return
@@ -426,6 +436,40 @@ class PlayerControls(discord.ui.View):
             return
         view = AddToPlaylistView(interaction.guild_id, [gp.current.copy()], f"**{clean(gp.current.title, 80)}**")
         await interaction.response.send_message(view.prompt(), view=view, ephemeral=True)
+
+    @discord.ui.button(emoji="📚", label="Playlists", style=discord.ButtonStyle.secondary,
+                       custom_id="mb:playlists", row=2)
+    async def playlists_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        browser = PlaylistBrowser(interaction.guild_id)
+        await interaction.response.send_message(embed=browser.embed(), view=browser, ephemeral=True)
+
+
+class SeekModal(discord.ui.Modal, title="Jump to a time"):
+    position_input = discord.ui.TextInput(label="Time", placeholder="1:30, 90, +30 or -10", max_length=12)
+
+    def __init__(self, gp: GuildPlayer):
+        super().__init__()
+        self.gp = gp
+        self.position_input.placeholder = (f"Now at {fmt_time(gp.position())} of "
+                                           f"{fmt_time(gp.current.duration)} — try 1:30, +30 or -10")
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        gp = self.gp
+        if gp.current is None:
+            await reply(interaction, "Nothing is playing right now.")
+            return
+        if not await ensure_listener(interaction, gp):
+            return
+        parsed = parse_time(self.position_input.value)
+        if parsed is None:
+            await reply(interaction, "I couldn't read that time — try `1:30`, `90`, `+30` or `-10`.")
+            return
+        seconds, relative = parsed
+        target = gp.seek(gp.position() + seconds if relative else seconds, interaction.user.display_name)
+        if target is None:
+            await reply(interaction, "This track can't be sought (it's live or still loading).")
+            return
+        await interaction.response.defer()  # the panel refreshes itself once the stream restarts
 
 
 class SavedQueueView(discord.ui.View):
@@ -705,13 +749,17 @@ class AddToPlaylistView(discord.ui.View):
 # ------------------------------------------------------------ playlist browser
 
 class PlaylistBrowser(discord.ui.View):
-    """``/playlist view``: the list of playlists ↔ one playlist's tracks, with play buttons."""
+    """``/playlist view`` and 📚 on the player: the list of playlists ↔ one
+    playlist's tracks, with play / remove-a-song / delete-playlist controls."""
 
     def __init__(self, guild_id: int, name: str | None = None):
         super().__init__(timeout=600)
         self.guild_id = guild_id
         self.name = storage.resolve_name(guild_id, name) if name else None
         self.page = 0
+        self.notice: str | None = None           # one-shot line shown above the list
+        self.confirm_delete = False
+        self.pending_remove: tuple[int, dict] | None = None  # (index, track) picked for removal
         self._build()
 
     def _playlist(self) -> dict | None:
@@ -723,13 +771,14 @@ class PlaylistBrowser(discord.ui.View):
     def embed(self) -> discord.Embed:
         if self.name is None:
             playlists = storage.list_playlists(self.guild_id)
+            notice = f"{self.notice}\n\n" if self.notice else ""
             if not playlists:
                 return discord.Embed(
                     title="Playlists",
-                    description="No playlists yet.\nPress ⭐ **Save** on the player, "
-                                "or use `/playlist add` / `/playlist save`.",
+                    description=f"{notice}No playlists yet.\nPress ⭐ **Save** on the player, "
+                                "**Save as playlist** in 📜 Queue, or use `/playlist add`.",
                     colour=MUTED)
-            lines = [
+            lines = ([self.notice, ""] if self.notice else []) + [
                 f"📁 **{clean(n, 40)}** · {len(pl['tracks'])} track(s) · `{fmt_time(storage.total_duration(pl))}`"
                 for n, pl in sorted(playlists.items(), key=lambda kv: kv[0].casefold())
             ]
@@ -748,6 +797,8 @@ class PlaylistBrowser(discord.ui.View):
             f"`{i:>2}.` {link(Track.from_dict(t), 55)} · {duration_tag(Track.from_dict(t))}"
             for i, t in enumerate(tracks[start:start + PAGE_SIZE], start + 1)
         ] or ["*Empty — add songs with `/playlist add` or the ⭐ button on the player.*"]
+        if self.notice:
+            lines = [self.notice, ""] + lines
         embed = discord.Embed(title=f"📁 {self.name}", description=_fit(lines, 4096), colour=ACCENT)
         embed.set_footer(text=f"{len(tracks)} track(s) · {fmt_time(storage.total_duration(pl))}"
                               f"  ·  Page {self.page + 1}/{self._pages(pl)}")
@@ -780,30 +831,103 @@ class PlaylistBrowser(discord.ui.View):
         self._button("Play", "▶️", S.success, self._play, row=0, disabled=not has_tracks)
         self._button("Shuffle play", "🔀", S.primary, self._shuffle_play, row=0, disabled=not has_tracks)
         self._button("All playlists", "📚", S.secondary, self._back, row=0)
+        if self.confirm_delete:
+            self._button("Tap again to delete", "🗑️", S.danger, self._delete, row=0)
+        else:
+            self._button("Delete", "🗑️", S.secondary, self._delete, row=0, disabled=pl is None)
         if pages > 1:
             self._button(None, "◀️", S.secondary, self._prev, row=1, disabled=self.page == 0)
             self._button(None, "▶️", S.secondary, self._next, row=1, disabled=self.page >= pages - 1)
+        if not has_tracks:
+            return
+        if self.pending_remove is not None:
+            title = self.pending_remove[1].get("title", "Unknown")
+            self._button(truncate(f"Remove “{title}”", 80), "➖", S.danger, self._remove, row=2)
+            self._button("Cancel", None, S.secondary, self._cancel, row=2)
+            return
+        start = self.page * PAGE_SIZE
+        select = discord.ui.Select(
+            placeholder="Remove a song…",
+            options=[discord.SelectOption(label=truncate(f"{i + 1}. {t.get('title', 'Unknown')}", 100),
+                                          value=str(i))
+                     for i, t in enumerate(pl["tracks"][start:start + PAGE_SIZE], start)],
+            row=2)
+        select.callback = self._pick_remove
+        self.add_item(select)
 
     async def _update(self, interaction: discord.Interaction) -> None:
         embed = self.embed()
         self._build()
+        self.notice = None  # shown once
         await interaction.response.edit_message(embed=embed, view=self)
+
+    def _reset(self) -> None:
+        self.confirm_delete = False
+        self.pending_remove = None
 
     async def _open(self, interaction: discord.Interaction) -> None:
         self.name = storage.resolve_name(self.guild_id, interaction.data["values"][0])
         self.page = 0
+        self._reset()
         await self._update(interaction)
 
     async def _back(self, interaction: discord.Interaction) -> None:
         self.name = None
+        self._reset()
         await self._update(interaction)
 
     async def _prev(self, interaction: discord.Interaction) -> None:
         self.page = max(0, self.page - 1)
+        self._reset()
         await self._update(interaction)
 
     async def _next(self, interaction: discord.Interaction) -> None:
         self.page += 1
+        self._reset()
+        await self._update(interaction)
+
+    async def _cancel(self, interaction: discord.Interaction) -> None:
+        self._reset()
+        await self._update(interaction)
+
+    async def _pick_remove(self, interaction: discord.Interaction) -> None:
+        pl = self._playlist()
+        index = int(interaction.data["values"][0])
+        self._reset()
+        if pl and index < len(pl["tracks"]):
+            self.pending_remove = (index, pl["tracks"][index])
+        await self._update(interaction)
+
+    async def _remove(self, interaction: discord.Interaction) -> None:
+        if self.pending_remove is None:
+            await self._update(interaction)
+            return
+        (index, picked), self.pending_remove = self.pending_remove, None
+        pl = self._playlist()
+        # Someone may have edited the playlist meanwhile: only remove the very same entry.
+        if pl is None or index >= len(pl["tracks"]) or pl["tracks"][index] is not picked:
+            self.notice = "⚠️ The playlist changed in the meantime — pick the song again."
+        else:
+            try:
+                removed = await storage.remove_track(self.guild_id, self.name, index)
+                self.notice = f"➖ Removed **{clean(removed.get('title', 'Unknown'), 80)}**."
+            except storage.PlaylistError as exc:
+                self.notice = f"⚠️ {exc}"
+        await self._update(interaction)
+
+    async def _delete(self, interaction: discord.Interaction) -> None:
+        if not self.confirm_delete:
+            self._reset()
+            self.confirm_delete = True
+            await self._update(interaction)
+            return
+        name, self.name = self.name, None
+        self._reset()
+        try:
+            await storage.delete(self.guild_id, name)
+            self.notice = f"🗑️ Deleted **{clean(name, 50)}**."
+        except storage.PlaylistError as exc:
+            self.notice = f"⚠️ {exc}"
         await self._update(interaction)
 
     async def _play(self, interaction: discord.Interaction, *, shuffle: bool = False) -> None:
@@ -831,24 +955,3 @@ async def play_playlist(interaction: discord.Interaction, name: str | None, *,
     tracks = [Track.from_dict(t) for t in pl["tracks"]]
     await enqueue(interaction, gp, channel, tracks, shuffle=shuffle, replace=replace,
                   label=storage.resolve_name(interaction.guild_id, name))
-
-
-# ------------------------------------------------------------------- confirm
-
-class ConfirmView(discord.ui.View):
-    def __init__(self, confirm_label: str = "Delete"):
-        super().__init__(timeout=30)
-        self.confirmed: bool | None = None
-        self.confirm_btn.label = confirm_label
-
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger)
-    async def confirm_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        self.confirmed = True
-        self.stop()
-        await interaction.response.defer()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        self.confirmed = False
-        self.stop()
-        await interaction.response.defer()

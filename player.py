@@ -42,6 +42,10 @@ ALONE_TIMEOUT = 30         # leave (and save the queue) after this long alone
 HISTORY_SIZE = 50
 VOLUME_MAX = 2.0
 PREVIOUS_RESTART_AFTER = 5  # "previous" restarts the current track past this many seconds
+# Sticky panel: once chat pushes the panel up, repost it at the bottom after the
+# channel has been quiet this long (or after STICKY_MAX_WAIT during busy chat).
+STICKY_QUIET = 3.0
+STICKY_MAX_WAIT = 15.0
 
 LOOP_MODES = ("off", "queue", "track")
 
@@ -93,6 +97,9 @@ class GuildPlayer:
         self.panel: discord.Message | None = None
         self._panel_view: discord.ui.View | None = None
         self._panel_task: asyncio.Task | None = None
+        self._panel_lock = asyncio.Lock()  # one edit/repost at a time, so it never doubles up
+        self._sticky_task: asyncio.Task | None = None
+        self._last_chat = 0.0
         self._prefetch: tuple[Track, asyncio.Task] | None = None
 
         self._wake = asyncio.Event()
@@ -469,15 +476,23 @@ class GuildPlayer:
 
         self._panel_task = asyncio.ensure_future(_later())
 
-    async def update_panel(self, *, move_to_bottom: bool = False) -> None:
-        """Edit the panel in place, or (re)post it at the bottom of the channel
-        when ``move_to_bottom`` and it has been buried by other messages."""
-        channel = self.text_channel
-        msg = self.panel
-        buried = msg is not None and (
+    def _panel_buried(self) -> bool:
+        msg, channel = self.panel, self.text_channel
+        return msg is not None and (
             channel is None or msg.channel.id != channel.id
             or getattr(channel, "last_message_id", None) != msg.id
         )
+
+    async def update_panel(self, *, move_to_bottom: bool = False) -> None:
+        """Edit the panel in place, or (re)post it at the bottom of the channel
+        when ``move_to_bottom`` and it has been buried by other messages."""
+        async with self._panel_lock:
+            await self._update_panel(move_to_bottom)
+
+    async def _update_panel(self, move_to_bottom: bool) -> None:
+        channel = self.text_channel
+        msg = self.panel
+        buried = self._panel_buried()
         if msg is None and not move_to_bottom:
             return
         embed, view = self.render_panel()
@@ -497,6 +512,31 @@ class GuildPlayer:
             except discord.HTTPException as exc:
                 log.warning("Could not post panel: %s", exc)
 
+    def on_channel_message(self, message: discord.Message) -> None:
+        """A message landed in some channel: if it buried our panel, float the
+        panel back to the bottom once the chat settles (debounced)."""
+        msg, channel = self.panel, self.text_channel
+        if msg is None or channel is None or message.channel.id != channel.id or message.id == msg.id:
+            return
+        loop = asyncio.get_running_loop()
+        self._last_chat = loop.time()
+        if self._sticky_task is None or self._sticky_task.done():
+            self._sticky_task = asyncio.ensure_future(self._sticky(loop.time()))
+
+    async def _sticky(self, first: float) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            now = loop.time()
+            wait = min(self._last_chat + STICKY_QUIET, first + STICKY_MAX_WAIT) - now
+            if wait <= 0:
+                break
+            await asyncio.sleep(wait)
+        async with self._panel_lock:
+            # Re-check under the lock: the panel may have been closed (stop) or
+            # already reposted by a track change while we waited.
+            if self.panel is not None and self._panel_buried():
+                await self._update_panel(True)
+
     async def _delete_panel(self) -> None:
         msg, self.panel = self.panel, None
         if msg is not None:
@@ -509,6 +549,12 @@ class GuildPlayer:
         """Replace the live panel with a final card (e.g. "Stopped — Resume?")."""
         if self._panel_task and not self._panel_task.done():
             self._panel_task.cancel()
+        # A pending sticky repost is left alone: it re-checks under the lock and
+        # finds no panel. (Cancelling it mid-send could orphan a live panel.)
+        async with self._panel_lock:
+            await self._close_panel(embed, view)
+
+    async def _close_panel(self, embed: discord.Embed, view: discord.ui.View | None) -> None:
         if self._panel_view is not None:
             self._panel_view.stop()
             self._panel_view = None

@@ -4,7 +4,7 @@ Each guild has two independent slots:
 
 * ``live``  — the queue that is playing *right now*, rewritten on every change.
   If the bot crashes or restarts, it rejoins and resumes this automatically.
-* ``saved`` — a queue parked by ``/stop``, everyone leaving, or a failed
+* ``saved`` — a queue parked by the ⏹️ Stop button, everyone leaving, or a failed
   reconnect. Restored only on request (``/continue`` or the Resume button), and
   never overwritten by new playback.
 
