@@ -340,7 +340,10 @@ class PlayerControls(discord.ui.View):
             return None
         return gp
 
-    async def _refresh(self, interaction: discord.Interaction, gp: GuildPlayer) -> None:
+    # NB: not "_refresh" — discord.ui.View._refresh(components) is called by
+    # discord.py on every MESSAGE_UPDATE of a tracked message; shadowing it
+    # raised inside the gateway loop and crashed the whole bot.
+    async def _redraw(self, interaction: discord.Interaction, gp: GuildPlayer) -> None:
         if gp.panel is not None and interaction.message and interaction.message.id == gp.panel.id:
             embed, view = gp.render_panel()
             await interaction.response.edit_message(embed=embed, view=view)
@@ -355,7 +358,7 @@ class PlayerControls(discord.ui.View):
         if not gp.previous(interaction.user.display_name):
             await reply(interaction, "There's nothing before this track.")
             return
-        await self._refresh(interaction, gp)
+        await self._redraw(interaction, gp)
 
     @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, custom_id="mb:pause", row=0)
     async def pause_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
@@ -364,7 +367,7 @@ class PlayerControls(discord.ui.View):
         if gp.toggle_pause(interaction.user.display_name) is None:
             await reply(interaction, "Nothing is playing right now.")
             return
-        await self._refresh(interaction, gp)
+        await self._redraw(interaction, gp)
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="mb:skip", row=0)
     async def skip_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
@@ -373,7 +376,7 @@ class PlayerControls(discord.ui.View):
         if not gp.skip(interaction.user.display_name):
             await reply(interaction, "Nothing to skip.")
             return
-        await self._refresh(interaction, gp)
+        await self._redraw(interaction, gp)
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="mb:stop", row=0)
     async def stop_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
@@ -395,28 +398,28 @@ class PlayerControls(discord.ui.View):
         if (gp := await self._player(interaction)) is None:
             return
         gp.shuffle(interaction.user.display_name)
-        await self._refresh(interaction, gp)
+        await self._redraw(interaction, gp)
 
     @discord.ui.button(emoji="🔁", label="Loop", style=discord.ButtonStyle.secondary, custom_id="mb:loop", row=1)
     async def loop_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if (gp := await self._player(interaction)) is None:
             return
         gp.cycle_loop(interaction.user.display_name)
-        await self._refresh(interaction, gp)
+        await self._redraw(interaction, gp)
 
     @discord.ui.button(emoji="🔉", style=discord.ButtonStyle.secondary, custom_id="mb:voldown", row=1)
     async def volume_down_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if (gp := await self._player(interaction)) is None:
             return
         gp.set_volume(gp.volume - VOLUME_STEP, interaction.user.display_name)
-        await self._refresh(interaction, gp)
+        await self._redraw(interaction, gp)
 
     @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, custom_id="mb:volup", row=1)
     async def volume_up_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if (gp := await self._player(interaction)) is None:
             return
         gp.set_volume(gp.volume + VOLUME_STEP, interaction.user.display_name)
-        await self._refresh(interaction, gp)
+        await self._redraw(interaction, gp)
 
     @discord.ui.button(emoji="⏩", label="Seek", style=discord.ButtonStyle.secondary, custom_id="mb:seek", row=2)
     async def seek_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):

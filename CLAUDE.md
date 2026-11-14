@@ -64,6 +64,11 @@ way; never `from player import …` inside `views` or the reverse.
   `add/start`, so the loop can't overwrite a parked queue.
 - Persistent view `custom_id`s (`mb:*`) are a public contract with messages
   already posted in servers. Don't rename them.
+- Never name a method or attribute on a `View`/`Modal` subclass after one of
+  discord.py's private members (`_refresh`, `_children`, `_cache_key`, …).
+  discord.py calls those from the gateway loop: a `PlayerControls._refresh`
+  once made every panel edit crash the whole process. Check with
+  `hasattr(discord.ui.View, name)` before adding a `_helper`.
 
 ## UX conventions
 
