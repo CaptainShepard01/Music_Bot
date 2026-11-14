@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 log = logging.getLogger(__name__)
 
 PLAYLISTS_FILE = "playlists.json"
+MAX_NAME_LENGTH = 50
 
 # { "<guild_id>": { "<playlist name>": {tracks, created_by, created_at} } }
 _data: dict[str, dict] = {}
@@ -73,21 +74,32 @@ def get(gid: int, name: str) -> dict | None:
     return _guild(gid)[key] if key else None
 
 
+def resolve_name(gid: int, name: str) -> str | None:
+    """The stored spelling of ``name`` (lookups are case-insensitive)."""
+    return _find(gid, name)
+
+
+def total_duration(playlist: dict) -> int:
+    return sum(int(t.get("duration") or 0) for t in playlist["tracks"])
+
+
 # --- mutations (lock-guarded, persisted) ---
 
-async def create(gid: int, name: str, user_id: int) -> None:
-    name = name.strip()
+def _new_playlist(user_id: int | None) -> dict:
+    return {
+        "tracks": [],
+        "created_by": str(user_id) if user_id else None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _valid_name(name: str) -> str:
+    name = " ".join(name.split())
     if not name:
         raise PlaylistError("Playlist name cannot be empty.")
-    async with _lock:
-        if _find(gid, name):
-            raise PlaylistError(f"A playlist named **{name}** already exists.")
-        _guild(gid)[name] = {
-            "tracks": [],
-            "created_by": str(user_id),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        _save()
+    if len(name) > MAX_NAME_LENGTH:
+        raise PlaylistError(f"Playlist names can be at most {MAX_NAME_LENGTH} characters.")
+    return name
 
 
 async def delete(gid: int, name: str) -> None:
@@ -99,23 +111,18 @@ async def delete(gid: int, name: str) -> None:
         _save()
 
 
-async def add_track(gid: int, name: str, track: dict) -> str:
-    """Append a track ({url, title, duration}); creates the playlist if missing.
-    Returns the resolved playlist name."""
+async def add_tracks(gid: int, name: str, tracks: list[dict], user_id: int | None = None) -> tuple[str, bool]:
+    """Append tracks ({url, title, duration, …}), creating the playlist if it
+    doesn't exist. Returns ``(resolved playlist name, created)``."""
     async with _lock:
         key = _find(gid, name)
-        if not key:
-            key = name.strip()
-            if not key:
-                raise PlaylistError("Playlist name cannot be empty.")
-            _guild(gid)[key] = {
-                "tracks": [],
-                "created_by": None,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-        _guild(gid)[key]["tracks"].append(track)
+        created = key is None
+        if created:
+            key = _valid_name(name)
+            _guild(gid)[key] = _new_playlist(user_id)
+        _guild(gid)[key]["tracks"].extend(tracks)
         _save()
-        return key
+        return key, created
 
 
 async def remove_track(gid: int, name: str, index: int) -> dict:

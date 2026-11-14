@@ -9,18 +9,23 @@ commands. Built with [discord.py](https://github.com/Rapptz/discord.py),
 
 ## Features
 
-- 🎵 **Stream from YouTube** — play a direct link or search by keywords and pick from a dropdown
-- 📋 **Per-guild queues** — append, view, skip, pause/resume, and clear the queue
-- 💾 **Shared playlists** — save tracks into named playlists per server, then play them (with optional shuffle)
-- 🔁 **Resilient playback** — survives internet drops by reconnecting for up to 10 minutes (whenever someone is still in the channel) and re-fetches expired stream URLs
-- 💿 **Resumable queue** — the live queue is saved to disk on every change, so a crash or restart picks up where it left off; `/stop` and `/leave` offer to save the queue for a later `/continue`
-- 👋 **Auto-disconnect** — leaves when the channel empties (saving the queue for `/continue` if one was playing) or after 5 minutes of inactivity
+- 🎛️ **Live player panel** — one "Now Playing" message with buttons for previous, pause/resume, skip, stop, queue, shuffle, loop, volume and save-to-playlist. It updates in place instead of flooding the channel.
+- 🔎 **Search as you type** — `/play` suggests YouTube results (and your saved playlists) while you type. Pick one, or just press Enter to play the top hit.
+- 🔗 **Links and playlists** — paste a video link or a whole YouTube playlist link (up to 200 tracks).
+- 📜 **Interactive queue** — browse pages, then play now, move up next, or remove any track; shuffle, clear, or save the whole queue as a playlist.
+- 💾 **Shared playlists** — save songs to named playlists per server, browse them, and play them (optionally shuffled).
+- 🔁 **Loop, history and seek** — loop the track or the whole queue; ⏮ goes back a track (or restarts the current one); `/seek` jumps to any time in the song (`1:30`, `+30`, `-10`).
+- 🛟 **Resilient playback** — survives internet drops by reconnecting for up to 10 minutes while someone is still listening, then resumes **from where the song cut out**. The next track is preloaded so songs start without a gap.
+- ♻️ **Nothing gets lost** — the live queue is saved on every change, so a crash or restart picks up where it left off. Stopping, everyone leaving, or a failed reconnect saves the queue in a separate slot that new playback won't overwrite; bring it back with the **Resume** button or `/continue`.
+- 👋 **Auto-disconnect** — leaves 30 s after the channel empties (saving the queue) or after 5 minutes of silence.
+- 🤫 **Quiet by design** — control commands answer privately, and the panel footer shows who did what.
 
 ## Prerequisites
 
 | Dependency | Notes |
 |------------|-------|
-| Python 3.10+ | Uses `asyncio.get_running_loop()` and modern type hints |
+| Python 3.10+ | Uses modern type hints |
+| deno | JS runtime yt-dlp uses to solve YouTube's challenges (`curl -fsSL https://deno.land/install.sh \| sh`) |
 | [uv](https://docs.astral.sh/uv/) | Package and venv manager (or use plain `pip`) |
 | FFmpeg | `ffmpeg` and `ffprobe` must be on your `PATH` |
 | A Discord bot token | Create one at [discord.com/developers](https://discord.com/developers/applications) |
@@ -83,7 +88,8 @@ uv run python bot.py
 ```
 
 Slash commands are registered globally on startup. Global commands can take up
-to an hour to appear in every server the first time.
+to an hour to appear in every server the first time. While developing, set
+`DEV_GUILD_ID` in `.env` to sync instantly to a single server.
 
 ## Running as a systemd service (Linux)
 
@@ -109,50 +115,57 @@ journalctl -u music-bot -f       # follow logs
 
 ## Commands
 
+Most of the time you only need `/play`. Everything else is also on the player panel's buttons.
+
 ### Playback
 
 | Command | Description |
 |---------|-------------|
-| `/join` | Join your current voice channel |
-| `/play <query>` | Play a YouTube URL, or search and pick from a dropdown |
-| `/pause` | Pause playback |
-| `/resume` | Resume paused playback |
-| `/skip` | Skip the current song |
-| `/stop` | Stop playback and clear the queue (offers to save it for `/continue`) |
-| `/queue` | Show the current queue |
-| `/continue` | Resume a previously saved queue |
-| `/leave` | Disconnect the bot from voice (offers to save the queue for `/continue`) |
+| `/play <query> [next] [shuffle]` | Play a song, YouTube link, YouTube playlist link, or saved playlist. Suggestions appear as you type. Joins your voice channel automatically. `next` puts it at the front of the queue. |
+| `/pause` | Pause, or resume if paused |
+| `/skip [to]` | Skip the current song, or jump straight to a track in the queue |
+| `/seek <position>` | Jump to a time in the current song: `1:30`, `90`, or `+30` / `-10` relative to now (suggestions offer quick jumps) |
+| `/stop` | Stop, leave the voice channel, and save the queue for later |
+| `/queue` | Browse and manage the queue (play now, move up next, remove, shuffle, clear, save as playlist) |
+| `/nowplaying` | Bring the player panel to the bottom of the current channel |
+| `/volume [level]` | Show or set the volume (0–200%) |
+| `/continue` | Bring back the queue saved by the last stop |
+
+Only people in the bot's voice channel can control playback.
 
 ### Playlists
 
-Playlists are **shared per server** — anyone in the guild can view, edit, play, or delete them.
+Playlists are **shared per server**: anyone in the server can view, edit, play, or delete them. They're created on the fly, with no separate "create" step.
 
 | Command | Description |
 |---------|-------------|
-| `/playlist create <name>` | Create a new empty playlist |
-| `/playlist add <name> <query>` | Add a track (URL or search) to a playlist |
-| `/playlist addcurrent <name>` | Add the currently playing track to a playlist |
-| `/playlist remove <name> <track>` | Remove a track from a playlist |
-| `/playlist show <name>` | Show the tracks in a playlist |
-| `/playlist list` | List all playlists |
-| `/playlist play <name> [mode] [shuffle]` | Play a playlist (append or replace the queue, optionally shuffled) |
+| `/playlist play <name> [shuffle] [replace]` | Play a playlist (adds to the queue, or replaces it) |
+| `/playlist view [name]` | Browse all playlists, or open one, with Play / Shuffle buttons |
+| `/playlist add <name> [query]` | Add a song (or a whole YouTube playlist) to a playlist. Leave `query` empty to add what's playing now. |
+| `/playlist save <name>` | Save the current song plus the whole queue as a playlist |
+| `/playlist remove <name> <track>` | Remove a song from a playlist |
 | `/playlist delete <name>` | Delete a playlist (with confirmation) |
 
-Playlists are stored in `playlists.json` in the project directory. The live
-playback queue is saved separately in `sessions.json` (also in the project
-directory) so it can be resumed after an outage or restart.
+The ⭐ **Save** button on the player panel adds the current song to any playlist (or a new one).
+
+Playlists are stored in `playlists.json` in the project directory. The live and
+saved playback queues are stored separately in `sessions.json`.
 
 ## Project structure
 
 ```
 Music_Bot/
-├── bot.py              # Entry point: loads cogs, syncs slash commands, runs the bot
-├── player.py           # Playback engine: queue state, yt-dlp helpers, player loop
+├── bot.py              # Entry point: loads cogs, registers persistent buttons, syncs commands
+├── player.py           # Playback engine: per-guild GuildPlayer (queue, loop, reconnects, panel)
+├── sources.py          # yt-dlp: search, links/playlists → tracks, stream resolution
+├── views.py            # Embeds, the player panel, queue/playlist browsers, buttons and menus
+├── autocomplete.py     # Slash-command suggestions (live search, playlists, queue)
 ├── storage.py          # Persistent per-guild playlist storage (JSON)
-├── session.py          # Persistent live-queue state for crash/drop resume (JSON)
+├── session.py          # Persistent live/saved queue state for resume (JSON)
 ├── cogs/
-│   ├── music.py        # Playback and queue commands
+│   ├── music.py        # Playback commands
 │   └── playlists.py    # /playlist command group
+├── CLAUDE.md           # Architecture notes and invariants for AI-assisted development
 ├── requirements.txt    # Python dependencies
 ├── .env.example        # Template for .env
 ├── install-service.sh  # Installs the systemd service on Linux

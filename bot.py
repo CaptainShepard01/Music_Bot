@@ -2,84 +2,78 @@ import logging
 import os
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
 import player
 import session
 import storage
+import views
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
-
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-
-async def setup_hook():
-    storage.load()
-    session.load()
-    await bot.load_extension("cogs.music")
-    await bot.load_extension("cogs.playlists")
-    await bot.tree.sync()
-    print("Slash commands synced.")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("bot")
 
 
-bot.setup_hook = setup_hook
+class MusicBot(commands.Bot):
+    def __init__(self):
+        super().__init__(
+            command_prefix=commands.when_mentioned,
+            intents=discord.Intents.default(),
+            # Every command needs a guild (voice, per-guild playlists).
+            allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=False, private_channel=False),
+            activity=discord.Activity(type=discord.ActivityType.listening, name="/play"),
+        )
+        self._resumed = False
 
-_resumed = False
+    async def setup_hook(self) -> None:
+        storage.load()
+        session.load()
+        player.setup(self)
+        # Persistent views: buttons on panels/cards keep working across restarts.
+        self.add_view(views.PlayerControls())
+        self.add_view(views.SavedQueueView())
+        await self.load_extension("cogs.music")
+        await self.load_extension("cogs.playlists")
+        self.tree.on_error = self.on_app_command_error
 
+        # DEV_GUILD_ID syncs instantly to one server (global sync can take up to an hour).
+        dev_guild = os.getenv("DEV_GUILD_ID")
+        if dev_guild:
+            guild = discord.Object(int(dev_guild))
+            self.tree.copy_global_to(guild=guild)
+            synced = await self.tree.sync(guild=guild)
+            log.info("Synced %d slash commands to dev guild %s.", len(synced), dev_guild)
+        else:
+            synced = await self.tree.sync()
+            log.info("Synced %d slash commands globally.", len(synced))
 
-async def _resume_sessions():
-    """After a restart, rejoin and resume any session that was interrupted
-    unintentionally (auto_resume=True) when a human is still in the channel.
-    Parked sessions are left untouched for /continue."""
-    for gid_str, saved in session.all().items():
-        if not saved.get("auto_resume"):
-            continue
+    async def on_ready(self) -> None:
+        log.info("Logged in as %s (%s)", self.user, self.user.id)
+        if not self._resumed:
+            self._resumed = True
+            await player.resume_all(self)
+
+    async def on_app_command_error(self, interaction: discord.Interaction,
+                                   error: app_commands.AppCommandError) -> None:
+        if isinstance(error, app_commands.CheckFailure):
+            message = "You can't use that here."
+        else:
+            log.error("Error in /%s", getattr(interaction.command, "qualified_name", "?"), exc_info=error)
+            message = "⚠️ Something went wrong — please try again."
         try:
-            gid = int(gid_str)
-            guild = bot.get_guild(gid)
-            if guild is None:
-                continue
-            voice_channel = guild.get_channel(saved.get("voice_channel_id"))
-            text_channel = guild.get_channel(saved.get("text_channel_id"))
-            if voice_channel is None or text_channel is None:
-                continue
-            if not any(not m.bot for m in voice_channel.members):
-                continue  # nobody to play for; keep it on disk for /continue
-
-            state = player.get_state(gid)
-            state["voice_channel"] = voice_channel
-            state["text_channel"] = text_channel
-            if guild.voice_client is None:
-                await voice_channel.connect()
-
-            entries = []
-            if saved.get("current"):
-                entries.append(saved["current"])
-            entries.extend(saved.get("queue", []))
-            if entries:
-                await player.enqueue_and_start(guild, text_channel, entries, replace=True)
-                await text_channel.send("Reconnected after a restart — resuming the queue.")
-        except Exception as exc:
-            log.warning("Could not resume session for guild %s: %s", gid_str, exc)
-
-
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} ({bot.user.id})")
-    global _resumed
-    if not _resumed:
-        _resumed = True
-        await _resume_sessions()
+            await views.reply(interaction, message)
+        except discord.HTTPException:
+            pass
 
 
 token = os.getenv("DISCORD_TOKEN")
 if not token:
-    raise SystemExit(
-        "DISCORD_TOKEN is not set. Copy .env.example to .env and add your bot token."
-    )
+    raise SystemExit("DISCORD_TOKEN is not set. Copy .env.example to .env and add your bot token.")
 
-bot.run(token)
+MusicBot().run(token, log_handler=None)  # logging is configured above
